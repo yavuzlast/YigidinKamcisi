@@ -1,67 +1,125 @@
-import { createClient } from '@/lib/supabase/server';
-import { redirect, notFound } from 'next/navigation';
+'use client';
+
+import { useEffect, useState } from 'react';
+import { useParams, useRouter } from 'next/navigation';
 import Link from 'next/link';
+import { createClient } from '@/lib/supabase/client';
 import { formatCurrency, getMonthName } from '@/lib/balances';
 import DeleteExpenseButton from './DeleteExpenseButton';
 
-interface PageProps {
-  params: Promise<{ id: string }>;
+interface ExpenseData {
+  id: string;
+  title: string;
+  notes: string | null;
+  total_amount: number;
+  expense_date: string;
+  is_installment: boolean;
+  installment_months: number;
+  payer_user_id: string;
+  created_by: string;
+  created_at: string;
 }
 
-export default async function ExpenseDetailPage({ params }: PageProps) {
-  const { id } = await params;
-  const supabase = await createClient();
+interface Member {
+  user_id: string;
+  display_name: string;
+  email: string;
+}
 
-  const { data: { user } } = await supabase.auth.getUser();
-  if (!user) redirect('/login');
+interface Occurrence {
+  id: string;
+  month: string;
+  amount: number;
+}
 
-  // Harcamayı al
-  const { data: expense } = await supabase
-    .from('expenses')
-    .select('*')
-    .eq('id', id)
-    .single();
+export default function ExpenseDetailPage() {
+  const params = useParams();
+  const router = useRouter();
+  const [loading, setLoading] = useState(true);
+  const [expense, setExpense] = useState<ExpenseData | null>(null);
+  const [payer, setPayer] = useState<Member | null>(null);
+  const [creator, setCreator] = useState<Member | null>(null);
+  const [participants, setParticipants] = useState<Member[]>([]);
+  const [occurrences, setOccurrences] = useState<Occurrence[]>([]);
+  const [isOwner, setIsOwner] = useState(false);
 
-  if (!expense) notFound();
+  const id = params.id as string;
 
-  // Grup üyelerini al
-  const { data: members } = await supabase
-    .from('group_members')
-    .select('*');
+  useEffect(() => {
+    const loadData = async () => {
+      const supabase = createClient();
 
-  // Payer ve creator bilgilerini members'dan bul
-  const payer = members?.find(m => m.user_id === expense.payer_user_id);
-  const creator = members?.find(m => m.user_id === expense.created_by);
+      const { data: { user } } = await supabase.auth.getUser();
+      if (!user) {
+        router.push('/login');
+        return;
+      }
 
-  // Katılımcıları al
-  const { data: rawParticipants } = await supabase
-    .from('expense_participants')
-    .select('user_id')
-    .eq('expense_id', id);
+      // Harcamayı al
+      const { data: expenseData } = await supabase
+        .from('expenses')
+        .select('*')
+        .eq('id', id)
+        .single();
 
-  // Katılımcı bilgilerini members'dan bul
-  const participants = rawParticipants?.map((p) => {
-    const member = members?.find(m => m.user_id === p.user_id);
-    return {
-      user_id: p.user_id,
-      member: member ? { display_name: member.display_name, email: member.email } : null,
+      if (!expenseData) {
+        router.push('/dashboard');
+        return;
+      }
+
+      setExpense(expenseData);
+      setIsOwner(expenseData.created_by === user.id);
+
+      // Grup üyelerini al
+      const { data: members } = await supabase
+        .from('group_members')
+        .select('*');
+
+      const payerMember = members?.find(m => m.user_id === expenseData.payer_user_id);
+      const creatorMember = members?.find(m => m.user_id === expenseData.created_by);
+      
+      setPayer(payerMember || null);
+      setCreator(creatorMember || null);
+
+      // Katılımcıları al
+      const { data: participantData } = await supabase
+        .from('expense_participants')
+        .select('user_id')
+        .eq('expense_id', id);
+
+      const participantMembers = participantData?.map(p => 
+        members?.find(m => m.user_id === p.user_id)
+      ).filter(Boolean) as Member[];
+
+      setParticipants(participantMembers || []);
+
+      // Occurrence'ları al
+      const { data: occData } = await supabase
+        .from('expense_occurrences')
+        .select('*')
+        .eq('expense_id', id)
+        .order('month');
+
+      setOccurrences(occData || []);
+      setLoading(false);
     };
-  });
 
-  // Occurrence'ları al
-  const { data: occurrences } = await supabase
-    .from('expense_occurrences')
-    .select('*')
-    .eq('expense_id', id)
-    .order('month');
+    loadData();
+  }, [id, router]);
 
-  const isOwner = expense.created_by === user.id;
-  const participantCount = participants?.length || 1;
+  if (loading || !expense) {
+    return (
+      <div className="flex items-center justify-center py-20">
+        <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-orange-500"></div>
+      </div>
+    );
+  }
+
+  const participantCount = participants.length || 1;
   const sharePerPerson = expense.total_amount / participantCount;
 
   return (
     <div className="max-w-2xl mx-auto">
-      {/* Header */}
       <div className="flex items-start justify-between mb-6">
         <div>
           <Link
@@ -87,20 +145,15 @@ export default async function ExpenseDetailPage({ params }: PageProps) {
       </div>
 
       <div className="space-y-6">
-        {/* Ana bilgiler */}
         <div className="card">
           <div className="grid grid-cols-2 gap-6">
             <div>
               <div className="text-sm text-[var(--color-text-muted)] mb-1">Toplam Tutar</div>
-              <div className="text-3xl font-bold text-orange-400">
-                {formatCurrency(expense.total_amount)}
-              </div>
+              <div className="text-3xl font-bold text-orange-400">{formatCurrency(expense.total_amount)}</div>
             </div>
             <div>
               <div className="text-sm text-[var(--color-text-muted)] mb-1">Kişi Başı</div>
-              <div className="text-3xl font-bold">
-                {formatCurrency(sharePerPerson)}
-              </div>
+              <div className="text-3xl font-bold">{formatCurrency(sharePerPerson)}</div>
             </div>
           </div>
 
@@ -110,9 +163,7 @@ export default async function ExpenseDetailPage({ params }: PageProps) {
                 <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z" />
                 </svg>
-                <span className="font-medium">
-                  {expense.installment_months} Taksit
-                </span>
+                <span className="font-medium">{expense.installment_months} Taksit</span>
               </div>
               <div className="text-sm text-[var(--color-text-muted)] mt-1">
                 Aylık: {formatCurrency(expense.total_amount / expense.installment_months)} / kişi
@@ -128,7 +179,6 @@ export default async function ExpenseDetailPage({ params }: PageProps) {
           )}
         </div>
 
-        {/* Kim Ödedi */}
         <div className="card">
           <h2 className="text-lg font-semibold mb-4 flex items-center gap-2">
             <svg className="w-5 h-5 text-orange-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -136,18 +186,19 @@ export default async function ExpenseDetailPage({ params }: PageProps) {
             </svg>
             Ödeyen
           </h2>
-          <div className="flex items-center gap-3 p-3 rounded-lg bg-[var(--color-bg)] border border-[var(--color-border)]">
-            <div className="w-10 h-10 rounded-full bg-green-500/20 flex items-center justify-center text-sm font-medium text-green-400">
-              {payer?.display_name?.[0]?.toUpperCase()}
+          {payer && (
+            <div className="flex items-center gap-3 p-3 rounded-lg bg-[var(--color-bg)] border border-[var(--color-border)]">
+              <div className="w-10 h-10 rounded-full bg-green-500/20 flex items-center justify-center text-sm font-medium text-green-400">
+                {payer.display_name?.[0]?.toUpperCase()}
+              </div>
+              <div>
+                <div className="font-medium">{payer.display_name}</div>
+                <div className="text-xs text-[var(--color-text-muted)]">{payer.email}</div>
+              </div>
             </div>
-            <div>
-              <div className="font-medium">{payer?.display_name}</div>
-              <div className="text-xs text-[var(--color-text-muted)]">{payer?.email}</div>
-            </div>
-          </div>
+          )}
         </div>
 
-        {/* Katılımcılar */}
         <div className="card">
           <h2 className="text-lg font-semibold mb-4 flex items-center gap-2">
             <svg className="w-5 h-5 text-orange-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -156,18 +207,18 @@ export default async function ExpenseDetailPage({ params }: PageProps) {
             Katılımcılar ({participantCount} kişi)
           </h2>
           <div className="space-y-2">
-            {participants?.map((p) => (
+            {participants.map((p) => (
               <div
                 key={p.user_id}
                 className="flex items-center justify-between p-3 rounded-lg bg-[var(--color-bg)] border border-[var(--color-border)]"
               >
                 <div className="flex items-center gap-3">
                   <div className="w-10 h-10 rounded-full bg-[var(--color-bg-hover)] flex items-center justify-center text-sm font-medium">
-                    {p.member?.display_name?.[0]?.toUpperCase()}
+                    {p.display_name?.[0]?.toUpperCase()}
                   </div>
                   <div>
-                    <div className="font-medium">{p.member?.display_name}</div>
-                    <div className="text-xs text-[var(--color-text-muted)]">{p.member?.email}</div>
+                    <div className="font-medium">{p.display_name}</div>
+                    <div className="text-xs text-[var(--color-text-muted)]">{p.email}</div>
                   </div>
                 </div>
                 <div className="text-right">
@@ -183,8 +234,7 @@ export default async function ExpenseDetailPage({ params }: PageProps) {
           </div>
         </div>
 
-        {/* Taksit Takvimi */}
-        {expense.is_installment && occurrences && occurrences.length > 0 && (
+        {expense.is_installment && occurrences.length > 0 && (
           <div className="card">
             <h2 className="text-lg font-semibold mb-4 flex items-center gap-2">
               <svg className="w-5 h-5 text-orange-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -201,19 +251,13 @@ export default async function ExpenseDetailPage({ params }: PageProps) {
                   <div
                     key={occ.id}
                     className={`flex items-center justify-between p-3 rounded-lg border ${
-                      isPast
-                        ? 'bg-green-500/5 border-green-500/20'
-                        : 'bg-[var(--color-bg)] border-[var(--color-border)]'
+                      isPast ? 'bg-green-500/5 border-green-500/20' : 'bg-[var(--color-bg)] border-[var(--color-border)]'
                     }`}
                   >
                     <div className="flex items-center gap-3">
-                      <div
-                        className={`w-8 h-8 rounded-full flex items-center justify-center text-sm font-medium ${
-                          isPast
-                            ? 'bg-green-500/20 text-green-400'
-                            : 'bg-[var(--color-bg-hover)]'
-                        }`}
-                      >
+                      <div className={`w-8 h-8 rounded-full flex items-center justify-center text-sm font-medium ${
+                        isPast ? 'bg-green-500/20 text-green-400' : 'bg-[var(--color-bg-hover)]'
+                      }`}>
                         {isPast ? (
                           <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
@@ -232,13 +276,10 @@ export default async function ExpenseDetailPage({ params }: PageProps) {
           </div>
         )}
 
-        {/* Meta bilgiler */}
         <div className="text-sm text-[var(--color-text-muted)] text-center">
-          {creator?.display_name} tarafından eklendi ·{' '}
-          {new Date(expense.created_at).toLocaleDateString('tr-TR')}
+          {creator?.display_name} tarafından eklendi · {new Date(expense.created_at).toLocaleDateString('tr-TR')}
         </div>
       </div>
     </div>
   );
 }
-

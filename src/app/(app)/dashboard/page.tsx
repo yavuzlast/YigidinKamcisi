@@ -1,85 +1,121 @@
-import { createClient } from '@/lib/supabase/server';
-import { calculateBalances, calculateSettlements, dateToMonthString, getMonthName, formatCurrency } from '@/lib/balances';
+'use client';
+
+import { useEffect, useState } from 'react';
+import { useSearchParams } from 'next/navigation';
+import { createClient } from '@/lib/supabase/client';
+import { calculateBalances, calculateSettlements, getMonthName, formatCurrency } from '@/lib/balances';
 import Link from 'next/link';
-import { redirect } from 'next/navigation';
 import MonthSelector from './MonthSelector';
 import ExpenseItem from './ExpenseItem';
+import { GroupMember, MemberBalance, Settlement } from '@/types/database';
 
-interface PageProps {
-  searchParams: Promise<{ month?: string }>;
+interface ExpenseWithPayer {
+  id: string;
+  title: string;
+  total_amount: number;
+  expense_date: string;
+  is_installment: boolean;
+  installment_months: number;
+  payer_user_id: string;
+  payer?: { display_name: string } | null;
 }
 
-export default async function DashboardPage({ searchParams }: PageProps) {
-  const params = await searchParams;
-  const supabase = await createClient();
-  
-  const { data: { user } } = await supabase.auth.getUser();
-  if (!user) redirect('/login');
+export default function DashboardPage() {
+  const searchParams = useSearchParams();
+  const [loading, setLoading] = useState(true);
+  const [members, setMembers] = useState<GroupMember[]>([]);
+  const [expenses, setExpenses] = useState<ExpenseWithPayer[]>([]);
+  const [balances, setBalances] = useState<MemberBalance[]>([]);
+  const [settlements, setSettlements] = useState<Settlement[]>([]);
+  const [totalExpenses, setTotalExpenses] = useState(0);
+  const [occurrenceCount, setOccurrenceCount] = useState(0);
 
-  // Varsayılan ay: Şubat 2026 veya şu anki ay (hangisi büyükse)
   const defaultMonth = '2026-02';
-  const currentMonth = params.month || defaultMonth;
+  const currentMonth = searchParams.get('month') || defaultMonth;
   const monthStart = `${currentMonth}-01`;
 
-  // Grup üyelerini al
-  const { data: members } = await supabase
-    .from('group_members')
-    .select('*')
-    .order('display_name');
+  useEffect(() => {
+    const loadData = async () => {
+      setLoading(true);
+      const supabase = createClient();
 
-  // Ay sonunu hesapla (bir sonraki ayın 1'i)
-  const [year, month] = currentMonth.split('-').map(Number);
-  const nextMonth = month === 12 ? 1 : month + 1;
-  const nextYear = month === 12 ? year + 1 : year;
-  const monthEnd = `${nextYear}-${String(nextMonth).padStart(2, '0')}-01`;
+      // Grup üyelerini al
+      const { data: membersData } = await supabase
+        .from('group_members')
+        .select('*')
+        .order('display_name');
 
-  // Bu aydaki expense occurrence'ları al
-  const { data: occurrences } = await supabase
-    .from('expense_occurrences')
-    .select(`
-      *,
-      expense:expenses(
-        id,
-        title,
-        payer_user_id,
-        expense_participants(user_id)
-      )
-    `)
-    .gte('month', monthStart)
-    .lt('month', monthEnd);
+      setMembers(membersData || []);
 
-  // Bu aydaki harcamaları listele
-  const { data: rawExpenses } = await supabase
-    .from('expenses')
-    .select('*')
-    .order('expense_date', { ascending: false });
+      // Ay sonunu hesapla
+      const [year, month] = currentMonth.split('-').map(Number);
+      const nextMonth = month === 12 ? 1 : month + 1;
+      const nextYear = month === 12 ? year + 1 : year;
+      const monthEnd = `${nextYear}-${String(nextMonth).padStart(2, '0')}-01`;
 
-  // Grup üyelerinden payer bilgisini al
-  const expenses = rawExpenses?.map(exp => {
-    const payer = members?.find(m => m.user_id === exp.payer_user_id);
-    return {
-      ...exp,
-      payer: payer ? { display_name: payer.display_name } : null
+      // Bu aydaki occurrence'ları al
+      const { data: occurrences } = await supabase
+        .from('expense_occurrences')
+        .select(`
+          *,
+          expense:expenses(
+            id,
+            title,
+            payer_user_id,
+            expense_participants(user_id)
+          )
+        `)
+        .gte('month', monthStart)
+        .lt('month', monthEnd);
+
+      // Harcamaları al
+      const { data: rawExpenses } = await supabase
+        .from('expenses')
+        .select('*')
+        .order('expense_date', { ascending: false });
+
+      // Payer bilgisini ekle
+      const expensesWithPayer = rawExpenses?.map(exp => {
+        const payer = membersData?.find(m => m.user_id === exp.payer_user_id);
+        return {
+          ...exp,
+          payer: payer ? { display_name: payer.display_name } : null
+        };
+      }) || [];
+
+      setExpenses(expensesWithPayer);
+
+      // Occurrence'ları hesaplama için hazırla
+      const occurrencesWithDetails = (occurrences || []).map((occ) => ({
+        ...occ,
+        payer_user_id: occ.expense?.payer_user_id || '',
+        participant_user_ids: occ.expense?.expense_participants?.map((p: { user_id: string }) => p.user_id) || [],
+      }));
+
+      // Bakiyeleri hesapla
+      const calculatedBalances = calculateBalances(membersData || [], occurrencesWithDetails);
+      const calculatedSettlements = calculateSettlements(calculatedBalances);
+
+      setBalances(calculatedBalances);
+      setSettlements(calculatedSettlements);
+      setTotalExpenses(occurrencesWithDetails.reduce((sum, occ) => sum + Number(occ.amount), 0));
+      setOccurrenceCount(occurrencesWithDetails.length);
+      setLoading(false);
     };
-  });
 
-  // Occurrence'ları hesaplama için hazırla
-  const occurrencesWithDetails = (occurrences || []).map((occ) => ({
-    ...occ,
-    payer_user_id: occ.expense?.payer_user_id || '',
-    participant_user_ids: occ.expense?.expense_participants?.map((p: { user_id: string }) => p.user_id) || [],
-  }));
+    loadData();
+  }, [currentMonth, monthStart]);
 
-  // Bakiyeleri hesapla
-  const balances = calculateBalances(members || [], occurrencesWithDetails);
-  const settlements = calculateSettlements(balances);
-
-  // Bu ay için toplam harcama
-  const totalExpenses = occurrencesWithDetails.reduce((sum, occ) => sum + Number(occ.amount), 0);
+  if (loading) {
+    return (
+      <div className="flex items-center justify-center py-20">
+        <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-orange-500"></div>
+      </div>
+    );
+  }
 
   return (
     <div className="space-y-8">
-      {/* Header */}
       <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
         <div>
           <h1 className="text-2xl font-bold">Aylık Özet</h1>
@@ -88,7 +124,6 @@ export default async function DashboardPage({ searchParams }: PageProps) {
         <MonthSelector currentMonth={currentMonth} />
       </div>
 
-      {/* Stats Cards */}
       <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
         <div className="card animate-fade-in stagger-1">
           <div className="text-[var(--color-text-muted)] text-sm mb-1">Toplam Harcama</div>
@@ -96,7 +131,7 @@ export default async function DashboardPage({ searchParams }: PageProps) {
         </div>
         <div className="card animate-fade-in stagger-2">
           <div className="text-[var(--color-text-muted)] text-sm mb-1">Harcama Sayısı</div>
-          <div className="text-2xl font-bold">{occurrencesWithDetails.length}</div>
+          <div className="text-2xl font-bold">{occurrenceCount}</div>
         </div>
         <div className="card animate-fade-in stagger-3">
           <div className="text-[var(--color-text-muted)] text-sm mb-1">Transfer Sayısı</div>
@@ -104,9 +139,7 @@ export default async function DashboardPage({ searchParams }: PageProps) {
         </div>
       </div>
 
-      {/* Balances & Settlements */}
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-        {/* Kişi Bakiyeleri */}
         <div className="card animate-fade-in stagger-4">
           <h2 className="text-lg font-semibold mb-4 flex items-center gap-2">
             <svg className="w-5 h-5 text-orange-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -116,9 +149,7 @@ export default async function DashboardPage({ searchParams }: PageProps) {
           </h2>
           
           {balances.length === 0 ? (
-            <p className="text-[var(--color-text-muted)] text-center py-8">
-              Henüz grup üyesi yok
-            </p>
+            <p className="text-[var(--color-text-muted)] text-center py-8">Henüz grup üyesi yok</p>
           ) : (
             <div className="space-y-3">
               {balances.map((balance) => (
@@ -137,17 +168,8 @@ export default async function DashboardPage({ searchParams }: PageProps) {
                       </div>
                     </div>
                   </div>
-                  <div
-                    className={`font-semibold ${
-                      balance.net_balance > 0
-                        ? 'text-green-400'
-                        : balance.net_balance < 0
-                        ? 'text-red-400'
-                        : 'text-[var(--color-text-muted)]'
-                    }`}
-                  >
-                    {balance.net_balance > 0 && '+'}
-                    {formatCurrency(balance.net_balance)}
+                  <div className={`font-semibold ${balance.net_balance > 0 ? 'text-green-400' : balance.net_balance < 0 ? 'text-red-400' : 'text-[var(--color-text-muted)]'}`}>
+                    {balance.net_balance > 0 && '+'}{formatCurrency(balance.net_balance)}
                   </div>
                 </div>
               ))}
@@ -155,7 +177,6 @@ export default async function DashboardPage({ searchParams }: PageProps) {
           )}
         </div>
 
-        {/* Transfer Önerileri */}
         <div className="card animate-fade-in stagger-5">
           <h2 className="text-lg font-semibold mb-4 flex items-center gap-2">
             <svg className="w-5 h-5 text-orange-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -171,24 +192,18 @@ export default async function DashboardPage({ searchParams }: PageProps) {
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
                 </svg>
               </div>
-              <p className="text-[var(--color-text-muted)]">
-                Herkes eşit! Transfer gerekmiyor.
-              </p>
+              <p className="text-[var(--color-text-muted)]">Herkes eşit! Transfer gerekmiyor.</p>
             </div>
           ) : (
             <div className="space-y-3">
               {settlements.map((settlement, idx) => (
-                <div
-                  key={idx}
-                  className="flex items-center gap-3 p-4 rounded-lg bg-gradient-to-r from-red-500/5 to-green-500/5 border border-[var(--color-border)]"
-                >
+                <div key={idx} className="flex items-center gap-3 p-4 rounded-lg bg-gradient-to-r from-red-500/5 to-green-500/5 border border-[var(--color-border)]">
                   <div className="flex-1 flex items-center gap-2">
                     <div className="w-8 h-8 rounded-full bg-red-500/20 flex items-center justify-center text-xs font-medium text-red-400">
                       {settlement.from_name[0]?.toUpperCase()}
                     </div>
                     <span className="font-medium">{settlement.from_name}</span>
                   </div>
-                  
                   <div className="flex items-center gap-2">
                     <svg className="w-5 h-5 text-[var(--color-text-muted)]" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                       <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17 8l4 4m0 0l-4 4m4-4H3" />
@@ -198,7 +213,6 @@ export default async function DashboardPage({ searchParams }: PageProps) {
                       <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17 8l4 4m0 0l-4 4m4-4H3" />
                     </svg>
                   </div>
-
                   <div className="flex-1 flex items-center justify-end gap-2">
                     <span className="font-medium">{settlement.to_name}</span>
                     <div className="w-8 h-8 rounded-full bg-green-500/20 flex items-center justify-center text-xs font-medium text-green-400">
@@ -212,7 +226,6 @@ export default async function DashboardPage({ searchParams }: PageProps) {
         </div>
       </div>
 
-      {/* Recent Expenses */}
       <div className="card">
         <div className="flex items-center justify-between mb-4">
           <h2 className="text-lg font-semibold flex items-center gap-2">
@@ -231,9 +244,7 @@ export default async function DashboardPage({ searchParams }: PageProps) {
               </svg>
             </div>
             <p className="text-[var(--color-text-muted)] mb-4">Henüz harcama eklenmemiş</p>
-            <Link href="/expenses/new" className="btn btn-primary">
-              İlk Harcamayı Ekle
-            </Link>
+            <Link href="/expenses/new" className="btn btn-primary">İlk Harcamayı Ekle</Link>
           </div>
         ) : (
           <div className="space-y-2">
@@ -246,4 +257,3 @@ export default async function DashboardPage({ searchParams }: PageProps) {
     </div>
   );
 }
-
