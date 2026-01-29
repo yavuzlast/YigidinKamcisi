@@ -16,13 +16,11 @@ export default async function ExpenseDetailPage({ params }: PageProps) {
   if (!user) redirect('/login');
 
   // Harcamayı al
-  const { data: expense, error: expenseError } = await supabase
+  const { data: expense } = await supabase
     .from('expenses')
     .select('*')
     .eq('id', id)
     .single();
-
-  console.log('Expense detail:', expense, 'Error:', expenseError);
 
   if (!expense) notFound();
 

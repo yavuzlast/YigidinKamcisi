@@ -1,4 +1,4 @@
-import { createServerClient } from '@supabase/ssr';
+import { createServerClient, type CookieOptions } from '@supabase/ssr';
 import { cookies } from 'next/headers';
 
 export async function createClient() {
@@ -9,20 +9,25 @@ export async function createClient() {
     process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
     {
       cookies: {
-        getAll() {
-          return cookieStore.getAll();
+        async get(name: string) {
+          const cookie = cookieStore.get(name);
+          return cookie?.value;
         },
-        setAll(cookiesToSet) {
+        async set(name: string, value: string, options: CookieOptions) {
           try {
-            cookiesToSet.forEach(({ name, value, options }) =>
-              cookieStore.set(name, value, options)
-            );
+            cookieStore.set({ name, value, ...options });
           } catch {
-            // Server Component'te set çağrılırsa hata verir, ignore edilebilir
+            // Server Component'te set çağrılırsa hata verir
+          }
+        },
+        async remove(name: string, options: CookieOptions) {
+          try {
+            cookieStore.set({ name, value: '', ...options });
+          } catch {
+            // Server Component'te remove çağrılırsa hata verir
           }
         },
       },
     }
   );
 }
-

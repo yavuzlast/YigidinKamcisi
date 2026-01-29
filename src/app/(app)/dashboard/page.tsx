@@ -21,19 +21,11 @@ export default async function DashboardPage({ searchParams }: PageProps) {
   const currentMonth = params.month || defaultMonth;
   const monthStart = `${currentMonth}-01`;
 
-  console.log('Dashboard - currentMonth:', currentMonth, 'monthStart:', monthStart);
-
   // Grup üyelerini al
   const { data: members } = await supabase
     .from('group_members')
     .select('*')
     .order('display_name');
-
-  // Önce tüm occurrence'ları al (debug için)
-  const { data: allOccurrences } = await supabase
-    .from('expense_occurrences')
-    .select('*');
-  console.log('All occurrences in DB:', allOccurrences);
 
   // Ay sonunu hesapla (bir sonraki ayın 1'i)
   const [year, month] = currentMonth.split('-').map(Number);
@@ -41,10 +33,8 @@ export default async function DashboardPage({ searchParams }: PageProps) {
   const nextYear = month === 12 ? year + 1 : year;
   const monthEnd = `${nextYear}-${String(nextMonth).padStart(2, '0')}-01`;
 
-  console.log('Query range:', monthStart, 'to', monthEnd);
-
   // Bu aydaki expense occurrence'ları al
-  const { data: occurrences, error: occError } = await supabase
+  const { data: occurrences } = await supabase
     .from('expense_occurrences')
     .select(`
       *,
@@ -57,16 +47,12 @@ export default async function DashboardPage({ searchParams }: PageProps) {
     `)
     .gte('month', monthStart)
     .lt('month', monthEnd);
-  
-  console.log('Filtered occurrences:', occurrences, 'Error:', occError);
 
   // Bu aydaki harcamaları listele
-  const { data: rawExpenses, error: expError } = await supabase
+  const { data: rawExpenses } = await supabase
     .from('expenses')
     .select('*')
     .order('expense_date', { ascending: false });
-
-  console.log('Expenses:', rawExpenses, 'Error:', expError);
 
   // Grup üyelerinden payer bilgisini al
   const expenses = rawExpenses?.map(exp => {

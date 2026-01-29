@@ -23,7 +23,6 @@ export default function NewExpensePage() {
   const [installmentMonths, setInstallmentMonths] = useState(3);
   const [installmentStartMonth, setInstallmentStartMonth] = useState(dateToMonthString(new Date()));
 
-  // Grup üyelerini yükle
   useEffect(() => {
     const loadData = async () => {
       const supabase = createClient();
@@ -39,10 +38,7 @@ export default function NewExpensePage() {
         .select('*')
         .order('display_name');
 
-      console.log('Members loaded:', membersData, 'Error:', membersError);
-
       if (membersError) {
-        console.error('Üye yükleme hatası:', membersError);
         alert('Üyeler yüklenirken hata: ' + membersError.message);
         return;
       }
@@ -50,27 +46,19 @@ export default function NewExpensePage() {
       if (membersData && membersData.length > 0) {
         setMembers(membersData);
         setSelectedParticipants(membersData.map((m) => m.user_id));
-      } else {
-        console.log('No members found, checking groups...');
-        // Grup var mı kontrol et
-        const { data: groups, error: groupError } = await supabase.from('groups').select('*');
-        console.log('Groups:', groups, 'Error:', groupError);
+      } else if (user) {
+        const { data: groups } = await supabase.from('groups').select('*');
         
         if (!groups || groups.length === 0) {
-          alert('Henüz grup oluşturulmamış. Lütfen SQL şemasını çalıştırın.');
-        } else if (user) {
-          // Kullanıcıyı gruba ekle
-          const { error: insertError } = await supabase.from('group_members').insert({
+          alert('Henüz grup oluşturulmamış.');
+        } else {
+          await supabase.from('group_members').insert({
             group_id: groups[0].id,
             user_id: user.id,
             email: user.email,
             display_name: user.email?.split('@')[0] || 'Kullanıcı',
           });
-          console.log('Insert member error:', insertError);
-          if (!insertError) {
-            // Tekrar yükle
-            window.location.reload();
-          }
+          window.location.reload();
         }
       }
     };
@@ -88,10 +76,8 @@ export default function NewExpensePage() {
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    console.log('Form submit başladı', { title, amount, payerId, selectedParticipants });
     
     if (!title || !amount || !payerId || selectedParticipants.length === 0) {
-      console.log('Validation failed');
       alert('Lütfen tüm alanları doldurun');
       return;
     }
@@ -100,59 +86,44 @@ export default function NewExpensePage() {
     const supabase = createClient();
 
     try {
-      // Grup ID'sini al
-      console.log('Grup alınıyor...');
-      const { data: group, error: groupError } = await supabase
+      const { data: group } = await supabase
         .from('groups')
         .select('id')
         .limit(1)
         .single();
 
-      console.log('Grup:', group, 'Error:', groupError);
-      if (!group) throw new Error('Grup bulunamadı: ' + JSON.stringify(groupError));
+      if (!group) throw new Error('Grup bulunamadı');
 
-      // Harcamayı ekle
-      console.log('Harcama ekleniyor...');
-      const expenseData = {
-        group_id: group.id,
-        created_by: currentUserId,
-        payer_user_id: payerId,
-        title,
-        notes: notes || null,
-        total_amount: parseFloat(amount),
-        expense_date: expenseDate,
-        is_installment: isInstallment,
-        installment_months: isInstallment ? installmentMonths : 1,
-        installment_start_month: isInstallment ? `${installmentStartMonth}-01` : null,
-      };
-      console.log('Expense data:', expenseData);
-      
       const { data: expense, error: expenseError } = await supabase
         .from('expenses')
-        .insert(expenseData)
+        .insert({
+          group_id: group.id,
+          created_by: currentUserId,
+          payer_user_id: payerId,
+          title,
+          notes: notes || null,
+          total_amount: parseFloat(amount),
+          expense_date: expenseDate,
+          is_installment: isInstallment,
+          installment_months: isInstallment ? installmentMonths : 1,
+          installment_start_month: isInstallment ? `${installmentStartMonth}-01` : null,
+        })
         .select()
         .single();
 
-      console.log('Expense result:', expense, 'Error:', expenseError);
-      if (expenseError) throw new Error('Expense error: ' + JSON.stringify(expenseError));
+      if (expenseError) throw expenseError;
 
-      // Katılımcıları ekle
-      console.log('Katılımcılar ekleniyor...');
       const participantInserts = selectedParticipants.map((userId) => ({
         expense_id: expense.id,
         user_id: userId,
       }));
-      console.log('Participant inserts:', participantInserts);
 
       const { error: participantsError } = await supabase
         .from('expense_participants')
         .insert(participantInserts);
 
-      console.log('Participants error:', participantsError);
-      if (participantsError) throw new Error('Participants error: ' + JSON.stringify(participantsError));
+      if (participantsError) throw participantsError;
 
-      // Occurrence'ları oluştur
-      console.log('Occurrences oluşturuluyor...');
       const totalAmount = parseFloat(amount);
       const months = isInstallment ? installmentMonths : 1;
       const amountPerMonth = totalAmount / months;
@@ -167,7 +138,6 @@ export default function NewExpensePage() {
         const month = startDate.getMonth() + i;
         const actualYear = year + Math.floor(month / 12);
         const actualMonth = month % 12;
-        // YYYY-MM-01 formatında (UTC sorununu önlemek için string olarak)
         const monthStr = `${actualYear}-${String(actualMonth + 1).padStart(2, '0')}-01`;
         occurrences.push({
           expense_id: expense.id,
@@ -175,20 +145,16 @@ export default function NewExpensePage() {
           amount: Math.round(amountPerMonth * 100) / 100,
         });
       }
-      console.log('Occurrences:', occurrences);
 
       const { error: occurrencesError } = await supabase
         .from('expense_occurrences')
         .insert(occurrences);
 
-      console.log('Occurrences error:', occurrencesError);
-      if (occurrencesError) throw new Error('Occurrences error: ' + JSON.stringify(occurrencesError));
+      if (occurrencesError) throw occurrencesError;
 
-      console.log('Başarılı! Dashboard\'a yönlendiriliyor...');
       router.push('/dashboard');
       router.refresh();
     } catch (error: unknown) {
-      console.error('Harcama eklenirken hata:', error);
       const errorMessage = error instanceof Error ? error.message : String(error);
       alert('Harcama eklenirken hata: ' + errorMessage);
     } finally {
@@ -196,7 +162,6 @@ export default function NewExpensePage() {
     }
   };
 
-  // Taksit için gelecek ayları hesapla
   const futureMonths: string[] = [];
   const now = new Date();
   for (let i = 0; i <= 12; i++) {
@@ -214,7 +179,6 @@ export default function NewExpensePage() {
       </div>
 
       <form onSubmit={handleSubmit} className="card space-y-6">
-        {/* Başlık */}
         <div>
           <label className="block text-sm font-medium mb-2">Harcama Başlığı</label>
           <input
@@ -227,7 +191,6 @@ export default function NewExpensePage() {
           />
         </div>
 
-        {/* Tutar */}
         <div>
           <label className="block text-sm font-medium mb-2">Tutar (₺)</label>
           <input
@@ -242,7 +205,6 @@ export default function NewExpensePage() {
           />
         </div>
 
-        {/* Tarih */}
         <div>
           <label className="block text-sm font-medium mb-2">Harcama Tarihi</label>
           <input
@@ -254,7 +216,6 @@ export default function NewExpensePage() {
           />
         </div>
 
-        {/* Kim Ödedi */}
         <div>
           <label className="block text-sm font-medium mb-2">Kim Ödedi?</label>
           <select
@@ -271,13 +232,12 @@ export default function NewExpensePage() {
           </select>
         </div>
 
-        {/* Katılımcılar */}
         <div>
           <label className="block text-sm font-medium mb-2">
             Kimler Arasında Bölünsün?
           </label>
           <p className="text-xs text-[var(--color-text-muted)] mb-3">
-            Harcamaya dahil olmayacak kişilerin seçimini kaldırın (örn. kişisel eşyalar için).
+            Harcamaya dahil olmayacak kişilerin seçimini kaldırın.
           </p>
           <div className="space-y-2">
             {members.map((member) => (
@@ -326,7 +286,6 @@ export default function NewExpensePage() {
           )}
         </div>
 
-        {/* Taksit */}
         <div className="space-y-4">
           <label className="flex items-center gap-3 cursor-pointer">
             <div
@@ -378,7 +337,6 @@ export default function NewExpensePage() {
           )}
         </div>
 
-        {/* Notlar */}
         <div>
           <label className="block text-sm font-medium mb-2">Notlar (Opsiyonel)</label>
           <textarea
@@ -390,7 +348,6 @@ export default function NewExpensePage() {
           />
         </div>
 
-        {/* Butonlar */}
         <div className="flex gap-3 pt-4">
           <button
             type="button"
@@ -433,4 +390,3 @@ export default function NewExpensePage() {
     </div>
   );
 }
-

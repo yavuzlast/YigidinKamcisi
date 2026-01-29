@@ -1,4 +1,4 @@
-import { createServerClient } from '@supabase/ssr';
+import { createServerClient, type CookieOptions } from '@supabase/ssr';
 import { cookies } from 'next/headers';
 import { NextResponse } from 'next/server';
 
@@ -11,10 +11,12 @@ export async function GET(request: Request) {
   const error = searchParams.get('error');
   const error_description = searchParams.get('error_description');
 
-  // Eğer hata varsa login'e yönlendir
   if (error) {
-    console.error('Auth error:', error, error_description);
     return NextResponse.redirect(`${origin}/login?error=${encodeURIComponent(error_description || error)}`);
+  }
+
+  if (!code && !token_hash) {
+    return NextResponse.redirect(`${origin}/login?error=missing_code`);
   }
 
   const cookieStore = await cookies();
@@ -24,50 +26,43 @@ export async function GET(request: Request) {
     process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
     {
       cookies: {
-        getAll() {
-          return cookieStore.getAll();
+        async get(name: string) {
+          return cookieStore.get(name)?.value;
         },
-        setAll(cookiesToSet) {
-          cookiesToSet.forEach(({ name, value, options }) => {
-            cookieStore.set(name, value, options);
-          });
+        async set(name: string, value: string, options: CookieOptions) {
+          cookieStore.set({ name, value, ...options });
+        },
+        async remove(name: string, options: CookieOptions) {
+          cookieStore.delete(name);
         },
       },
     }
   );
 
-  // Token hash ile doğrulama (magic link)
+  let authError = null;
+
   if (token_hash && type) {
-    const { error: verifyError } = await supabase.auth.verifyOtp({
+    const { error } = await supabase.auth.verifyOtp({
       token_hash,
       type: type as 'magiclink' | 'email',
     });
-
-    if (verifyError) {
-      console.error('Verify OTP error:', verifyError);
-      return NextResponse.redirect(`${origin}/login?error=${encodeURIComponent(verifyError.message)}`);
-    }
-  }
-  // Code ile doğrulama (PKCE flow)
-  else if (code) {
-    const { error: exchangeError } = await supabase.auth.exchangeCodeForSession(code);
-
-    if (exchangeError) {
-      console.error('Exchange code error:', exchangeError);
-      return NextResponse.redirect(`${origin}/login?error=${encodeURIComponent(exchangeError.message)}`);
-    }
-  } else {
-    return NextResponse.redirect(`${origin}/login?error=missing_token`);
+    authError = error;
+  } else if (code) {
+    const { error } = await supabase.auth.exchangeCodeForSession(code);
+    authError = error;
   }
 
-  // Kullanıcı bilgilerini al
+  if (authError) {
+    return NextResponse.redirect(`${origin}/login?error=${encodeURIComponent(authError.message)}`);
+  }
+
   const { data: { user } } = await supabase.auth.getUser();
 
   if (!user?.email) {
     return NextResponse.redirect(`${origin}/login?error=no_user`);
   }
 
-  // İzinli e-posta kontrolü (boş veya tanımsızsa herkese izin ver)
+  // İzinli e-posta kontrolü
   const allowedEmailsRaw = process.env.ALLOWED_EMAILS?.trim() || '';
   const allowedEmails = allowedEmailsRaw ? allowedEmailsRaw.split(',').map(e => e.trim().toLowerCase()).filter(e => e) : [];
 
@@ -76,7 +71,7 @@ export async function GET(request: Request) {
     return NextResponse.redirect(`${origin}/login?error=unauthorized`);
   }
 
-  // Kullanıcıyı gruba ekle (eğer yoksa)
+  // Kullanıcıyı gruba ekle
   const { data: existingMember } = await supabase
     .from('group_members')
     .select('id')
